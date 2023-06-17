@@ -16,6 +16,7 @@
 package com.google.cloud.teleport.v2.templates;
 
 import static com.google.cloud.teleport.v2.templates.datastream.DatastreamConstants.EVENT_METADATA_KEY_PREFIX;
+import static com.google.cloud.teleport.v2.templates.datastream.DatastreamConstants.EVENT_SCHEMA_KEY;
 import static com.google.cloud.teleport.v2.templates.datastream.DatastreamConstants.EVENT_TABLE_NAME_KEY;
 import static com.google.cloud.teleport.v2.templates.datastream.DatastreamConstants.EVENT_UUID_KEY;
 
@@ -38,6 +39,7 @@ import com.google.cloud.teleport.v2.templates.datastream.ChangeEventSequenceFact
 import com.google.cloud.teleport.v2.templates.datastream.ChangeEventTypeConvertor;
 import com.google.cloud.teleport.v2.templates.datastream.InvalidChangeEventException;
 import com.google.cloud.teleport.v2.templates.session.ColumnDef;
+import com.google.cloud.teleport.v2.templates.session.CreateTable;
 import com.google.cloud.teleport.v2.templates.session.NameAndCols;
 import com.google.cloud.teleport.v2.templates.session.Session;
 import com.google.cloud.teleport.v2.templates.session.SrcSchema;
@@ -46,6 +48,8 @@ import com.google.cloud.teleport.v2.templates.spanner.common.Type;
 import com.google.cloud.teleport.v2.templates.spanner.ddl.Ddl;
 import com.google.cloud.teleport.v2.values.FailsafeElement;
 import com.google.common.base.Preconditions;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
 import java.io.PrintWriter;
 import java.io.Serializable;
 import java.io.StringWriter;
@@ -65,6 +69,7 @@ import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.TupleTag;
+import org.json.JSONObject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -91,6 +96,8 @@ class SpannerTransactionWriterDoFn extends DoFn<FailsafeElement<String, String>,
   private final PCollectionView<Ddl> ddlView;
 
   private final Session session;
+
+  private final JsonObject transformationContext;
 
   private final SpannerConfig spannerConfig;
 
@@ -134,6 +141,7 @@ class SpannerTransactionWriterDoFn extends DoFn<FailsafeElement<String, String>,
       SpannerConfig spannerConfig,
       PCollectionView<Ddl> ddlView,
       Session session,
+      JsonObject transformationContext,
       String shadowTablePrefix,
       String sourceType,
       Boolean roundJsonDecimals) {
@@ -141,6 +149,7 @@ class SpannerTransactionWriterDoFn extends DoFn<FailsafeElement<String, String>,
     this.spannerConfig = spannerConfig;
     this.ddlView = ddlView;
     this.session = session;
+    this.transformationContext = transformationContext;
     this.shadowTablePrefix =
         (shadowTablePrefix.endsWith("_")) ? shadowTablePrefix : shadowTablePrefix + "_";
     this.sourceType = sourceType;
@@ -277,6 +286,9 @@ class SpannerTransactionWriterDoFn extends DoFn<FailsafeElement<String, String>,
     // Convert table and column names in change event.
     changeEvent = convertTableAndColumnNames(changeEvent, tableName);
 
+    // Add shard id to change event
+    changeEvent = populateShardId(changeEvent, tableId);
+
     // Add synthetic PK to change event.
     changeEvent = addSyntheticPKs(changeEvent, tableId);
 
@@ -301,6 +313,26 @@ class SpannerTransactionWriterDoFn extends DoFn<FailsafeElement<String, String>,
         ((ObjectNode) changeEvent).remove(srcCol);
       }
     }
+    return changeEvent;
+  }
+
+  JsonNode populateShardId(JsonNode changeEvent, String tableId) {
+    if (transformationContext.asMap().isEmpty()) {
+      return changeEvent; // Nothing to do
+    }
+    CreateTable table = session.getSpSchema().get(tableId);
+    ColumnDef shardIdColDef = table.getColDefs().get(table.getShardIdColumn());
+
+    if (shardIdColDef == null) {
+      return changeEvent;
+    }
+    JsonElement schemaToShardId = transformationContext.asMap().get("schemaToShardId");
+    if(schemaToShardId==null || !schemaToShardId.isJsonObject()) {
+      return changeEvent;
+    }
+    String schemaName = changeEvent.get(EVENT_SCHEMA_KEY).asText();
+    String shardId = ((JsonObject)schemaToShardId).get(schemaName).getAsString();
+    ((ObjectNode) changeEvent).put(shardIdColDef.getName(), shardId);
     return changeEvent;
   }
 

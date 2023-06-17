@@ -15,6 +15,7 @@
  */
 package com.google.cloud.teleport.v2.templates;
 
+import com.google.api.client.json.Json;
 import com.google.api.services.datastream.v1.model.SourceConfig;
 import com.google.cloud.teleport.metadata.Template;
 import com.google.cloud.teleport.metadata.TemplateCategory;
@@ -33,7 +34,14 @@ import com.google.cloud.teleport.v2.templates.spanner.ddl.Ddl;
 import com.google.cloud.teleport.v2.transforms.DLQWriteTransform;
 import com.google.cloud.teleport.v2.utils.DataStreamClient;
 import com.google.cloud.teleport.v2.values.FailsafeElement;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import java.io.IOException;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.stream.Collectors;
 import org.apache.beam.runners.dataflow.options.DataflowPipelineOptions;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
@@ -295,6 +303,19 @@ public class DataStreamToSpanner {
     Boolean getRoundJsonDecimals();
 
     void setRoundJsonDecimals(Boolean value);
+
+    @TemplateParameter.Text(
+        order = 20,
+        optional = true,
+        description =
+            "Used to populate data used in transformations performed during migrations "
+                + "  Eg: The shard id to db name to identify the db from which a row was migrated",
+        helpText =
+            "Used to populate transformation logic as configured in the session file")
+    @Default.String("")
+    String getTransformationContext();
+
+    void setTransformationContext(String value);
   }
 
   private static void validateSourceType(Options options) {
@@ -381,6 +402,7 @@ public class DataStreamToSpanner {
 
     // Ingest session file into memory.
     Session session = (new ReadSessionFile(options.getSessionFilePath())).getSession();
+
     /*
      * Stage 1: Ingest/Normalize Data to FailsafeElement with JSON Strings and
      * read Cloud Spanner information schema.
@@ -448,6 +470,7 @@ public class DataStreamToSpanner {
                 spannerConfig,
                 ddlView,
                 session,
+                buildTransformationContext(options),
                 options.getShadowTablePrefix(),
                 options.getDatastreamSourceType(),
                 options.getRoundJsonDecimals()));
@@ -512,5 +535,13 @@ public class DataStreamToSpanner {
 
     LOG.info("Dead-letter queue directory: {}", dlqDirectory);
     return DeadLetterQueueManager.create(dlqDirectory, options.getDlqMaxRetryCount());
+  }
+
+  private static JsonObject buildTransformationContext(Options options) {
+    if (options.getTransformationContext() == null || options.getTransformationContext().isBlank()) {
+      return new JsonObject();
+    }
+    JsonParser parser = new JsonParser();
+    return parser.parseString(options.getTransformationContext()).getAsJsonObject();
   }
 }
